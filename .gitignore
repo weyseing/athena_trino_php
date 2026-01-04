@@ -1,0 +1,21 @@
+# PHP
+/vendor/
+/node_modules/
+.env
+.env.backup
+.phpunit.result.cache
+Homestead.json
+Homestead.yaml
+npm-debug.log
+yarn-error.log
+.user.ini
+error_log
+php_errors.log
+.htaccess
+.htpasswd
+Thumbs.db
+.DS_Store
+/nbproject/private/
+/storage/*.key
+/tests/_output/*
+/tests/_support/_generated
