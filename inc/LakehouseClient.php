@@ -2,90 +2,80 @@
 // inc/LakehouseClient.php
 
 use Aws\Athena\AthenaClient;
-use Clouding\Presto\Presto;
+use GuzzleHttp\Client as GuzzleClient;
 
 class LakehouseClient {
-    private $client;
     private $env;
     private $catalog;
+    private $guzzle;
 
     public function __construct($env = 'dev') {
         $this->env = $env;
-
         if ($this->env === 'production') {
-            $this->client = new AthenaClient([
-                'region'  => 'us-east-1', // Change to your region
-                'version' => 'latest'
-            ]);
+            // Athena setup
             $this->catalog = 'awsdatacatalog';
         } else {
-            // Local Trino Setup using the 'clouding' library
-            $this->client = new Presto();
-            $this->client->addConnection([
-                'host'    => 'trino:8080',
-                'user'    => 'admin',
-                'catalog' => 'iceberg', // Matches your iceberg.properties
-                'schema'  => 'default',
+            // Local Trino Setup
+            $this->guzzle = new GuzzleClient([
+                'base_uri' => 'http://lakehouse-athena:8080',
+                'timeout'  => 60.0,
             ]);
             $this->catalog = 'iceberg';
         }
     }
 
-    public function query(string $sql) {
+    public function getCatalog() {
+        return $this->catalog;
+    }
+
+    public function query(string $sql): array {
         if ($this->env === 'production') {
-            return $this->queryAthena($sql);
-        } else {
-            return $this->queryTrino($sql);
+            // Add your Athena query logic here
+            return [];
         }
-    }
 
-    private function queryTrino($sql) {
-        // The library handles the HTTP protocol for us
-        return $this->client->connection()->query($sql)->get();
-    }
-
-    private function queryAthena($sql) {
-        // 1. Start execution
-        $execution = $this->client->startQueryExecution([
-            'QueryString' => $sql,
-            'ResultConfiguration' => [
-                'OutputLocation' => 's3://your-athena-query-results-bucket/' 
+        // 1. Start the query
+        $response = $this->guzzle->post('/v1/statement', [
+            'body' => $sql,
+            'headers' => [
+                'X-Trino-User'    => 'admin',
+                'X-Trino-Catalog' => $this->catalog,
+                'X-Trino-Schema'  => 'default',
             ]
         ]);
 
-        $id = $execution['QueryExecutionId'];
+        $contents = json_decode($response->getBody()->getContents(), true);
 
-        // 2. Wait for completion (Polling)
-        while (true) {
-            $status = $this->client->getQueryExecution(['QueryExecutionId' => $id]);
-            $state = $status['QueryExecution']['Status']['State'];
+        // 2. Poll nextUri until data is available or query finishes
+        // Trino often sends back a 'queued' or 'planning' status first with no data
+        while (isset($contents['nextUri']) && !isset($contents['data'])) {
+            $response = $this->guzzle->get($contents['nextUri']);
+            $contents = json_decode($response->getBody()->getContents(), true);
 
-            if ($state === 'SUCCEEDED') break;
-            if (in_array($state, ['FAILED', 'CANCELLED'])) {
-                throw new Exception("Athena Query $state: " . $status['QueryExecution']['Status']['StateChangeReason']);
+            if (isset($contents['error'])) {
+                throw new Exception("Trino SQL Error: " . $contents['error']['message']);
             }
-            sleep(1); // Wait 1 second before checking again
+            
+            // Wait briefly to avoid overloading the coordinator
+            usleep(100000); // 100ms
         }
 
-        // 3. Fetch and Format Results
-        $results = $this->client->getQueryResults(['QueryExecutionId' => $id]);
-        return $this->formatAthenaRows($results['ResultSet']['Rows']);
+        return $this->formatResults($contents);
     }
 
-    private function formatAthenaRows($rows) {
-        if (empty($rows)) return [];
-        
-        $data = [];
-        $headers = array_column($rows[0]['Data'], 'VarCharValue');
-
-        for ($i = 1; $i < count($rows); $i++) {
-            $rowValues = array_column($rows[$i]['Data'], 'VarCharValue');
-            $data[] = array_combine($headers, $rowValues);
+    private function formatResults(array $contents): array {
+        if (!isset($contents['data']) || !isset($contents['columns'])) {
+            return [];
         }
-        return $data;
-    }
 
-    public function getCatalog() {
-        return $this->catalog;
+        $columns = array_column($contents['columns'], 'name');
+        $finalData = [];
+
+        foreach ($contents['data'] as $row) {
+            // Combine column names with row values
+            $finalData[] = array_combine($columns, $row);
+        }
+
+        return $finalData;
     }
 }

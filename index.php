@@ -6,22 +6,22 @@ require __DIR__ . '/inc/LakehouseClient.php';
 $env = getenv('APP_ENV') ?: 'dev';
 $lakehouse = new LakehouseClient($env);
 
-try {
-    echo "--- Connected to Lakehouse [$env] ---\n";
+echo "--- Lakehouse Explorer [$env] ---\n";
 
-    // Test Query: List schemas in our catalog
-    $catalog = $lakehouse->getCatalog();
-    $sql = "SHOW SCHEMAS FROM $catalog";
-    
+try {
+    // Test 1: Show all catalogs available in Trino
+    $sql = "SELECT merchantID, channel, bill_amt FROM iceberg.rds_master_onlinepayment1.transaction";
     echo "Executing: $sql\n";
     $results = $lakehouse->query($sql);
 
-    echo "Found " . count($results) . " schemas:\n";
+    echo "Found " . count($results) . " rows:\n";
+    $columns = array_keys($results[0]);
+    echo implode("\t| ", $columns) . "\n";
+    echo str_repeat("-", 50) . "\n";
     foreach ($results as $row) {
-        // The library returns an associative array
-        echo " - " . ($row['Schema'] ?? $row['schema'] ?? implode(',', $row)) . "\n";
+        echo implode("\t| ", array_values($row)) . "\n";
     }
 
 } catch (Exception $e) {
-    echo "❌ ERROR: " . $e->getMessage() . "\n";
+    echo "ERROR: " . $e->getMessage() . "\n";
 }
