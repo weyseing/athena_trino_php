@@ -1,0 +1,14 @@
+services:
+  athena_trino_php:
+    container_name: athena_trino_php
+    build: .
+    environment:
+      - APP_ENV=dev
+    volumes:
+      - ./:/app
+    networks:
+      - aws_molpay
+
+networks:
+  aws_molpay:
+    external: true
