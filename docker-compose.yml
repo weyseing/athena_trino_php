@@ -2,8 +2,8 @@ services:
   athena_trino_php:
     container_name: athena_trino_php
     build: .
-    environment:
-      - APP_ENV=dev
+    env_file:
+      - .env
     volumes:
       - ./:/app
     networks:

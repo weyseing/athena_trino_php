@@ -1,8 +1,8 @@
 {
     "name": "root/app",
     "require": {
-        "aws/aws-sdk-php": "^2.8",
-        "guzzlehttp/guzzle": "^6.5"
+        "aws/aws-sdk-php": "^3.0",
+        "guzzlehttp/guzzle": "^7.0"
     },
     "minimum-stability": "dev",
     "prefer-stable": true

@@ -8,33 +8,33 @@ class LakehouseClient {
     private $env;
     private $catalog;
     private $guzzle;
+    private $athena;
 
     public function __construct($env = 'dev') {
         $this->env = $env;
+        $this->catalog = 'awsdatacatalog';
+
         if ($this->env === 'production') {
-            // Athena setup
-            $this->catalog = 'awsdatacatalog';
+            $this->athena = new AthenaClient([
+                'region'  => 'ap-southeast-1',
+                'version' => 'latest',
+            ]);
         } else {
-            // Local Trino Setup
             $this->guzzle = new GuzzleClient([
                 'base_uri' => 'http://lakehouse-athena:8080',
                 'timeout'  => 60.0,
             ]);
-            $this->catalog = 'iceberg';
         }
-    }
-
-    public function getCatalog() {
-        return $this->catalog;
     }
 
     public function query(string $sql): array {
         if ($this->env === 'production') {
-            // Add your Athena query logic here
-            return [];
+            return $this->queryAthena($sql);
         }
+        return $this->queryTrino($sql);
+    }
 
-        // 1. Start the query
+    private function queryTrino(string $sql): array {
         $response = $this->guzzle->post('/v1/statement', [
             'body' => $sql,
             'headers' => [
@@ -43,37 +43,94 @@ class LakehouseClient {
                 'X-Trino-Schema'  => 'default',
             ]
         ]);
-
         $contents = json_decode($response->getBody()->getContents(), true);
-
-        // 2. Poll nextUri until data is available or query finishes
-        // Trino often sends back a 'queued' or 'planning' status first with no data
-        while (isset($contents['nextUri']) && !isset($contents['data'])) {
+        while (isset($contents['nextUri'])) {
+            // check complete or error
+            if (isset($contents['data'])) {
+                return $this->formatTrinoResults($contents);
+            }
+            if (isset($contents['error'])) {
+                throw new Exception("Trino Error: " . $contents['error']['message']);
+            }
+            usleep(100000); 
             $response = $this->guzzle->get($contents['nextUri']);
             $contents = json_decode($response->getBody()->getContents(), true);
-
-            if (isset($contents['error'])) {
-                throw new Exception("Trino SQL Error: " . $contents['error']['message']);
-            }
-            
-            // Wait briefly to avoid overloading the coordinator
-            usleep(100000); // 100ms
         }
-
-        return $this->formatResults($contents);
+        return [];
     }
 
-    private function formatResults(array $contents): array {
+    private function queryAthena(string $sql): array {
+        $execution = $this->athena->startQueryExecution([
+            'QueryString' => $sql,
+            'QueryExecutionContext' => [
+                'Catalog' => $this->catalog,
+                'Database' => 'default'
+            ],
+            'ResultConfiguration' => [
+                'OutputLocation' => getenv('ATHENA_OUTPUT_S3_PATH'), 
+            ],
+        ]);
+        $queryExecutionId = $execution['QueryExecutionId'];
+
+        // poll for completion
+        $finished = false;
+        while (!$finished) {
+            $status = $this->athena->getQueryExecution([
+                'QueryExecutionId' => $queryExecutionId
+            ]);
+            $state = $status['QueryExecution']['Status']['State'];
+            switch ($state) {
+                case 'SUCCEEDED':
+                    $finished = true;
+                    break;
+                case 'FAILED':
+                    $reason = $status['QueryExecution']['Status']['StateChangeReason'];
+                    throw new Exception("Athena Query Failed: $reason");
+                case 'CANCELLED':
+                    throw new Exception("Athena Query was cancelled.");
+                default:
+                    sleep(1); 
+                    break;
+            }
+        }
+
+        $results = $this->athena->getQueryResults([
+            'QueryExecutionId' => $queryExecutionId
+        ]);
+        return $this->formatAthenaResults($results);
+    }
+
+    private function formatTrinoResults(array $contents): array {
         if (!isset($contents['data']) || !isset($contents['columns'])) {
             return [];
         }
-
         $columns = array_column($contents['columns'], 'name');
         $finalData = [];
-
         foreach ($contents['data'] as $row) {
-            // Combine column names with row values
             $finalData[] = array_combine($columns, $row);
+        }
+        return $finalData;
+    }
+
+    private function formatAthenaResults($results): array {
+        $rows = $results['ResultSet']['Rows'];
+        if (empty($rows)) return [];
+
+        // header
+        $columnHeaderRow = array_shift($rows); 
+        $columnNames = array_map(function($col) {
+            return $col['VarCharValue'] ?? 'unknown';
+        }, $columnHeaderRow['Data']);
+
+        // data rows
+        $finalData = [];
+        foreach ($rows as $row) {
+            $rowData = [];
+            foreach ($row['Data'] as $index => $cell) {
+                $key = $columnNames[$index];
+                $rowData[$key] = $cell['VarCharValue'] ?? null;
+            }
+            $finalData[] = $rowData;
         }
 
         return $finalData;

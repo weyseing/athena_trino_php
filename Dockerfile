@@ -20,9 +20,6 @@ COPY . .
 COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 
 # composer install
-RUN composer init --no-interaction && \
-    composer config minimum-stability dev && \
-    composer config prefer-stable true && \
-    composer require aws/aws-sdk-php clouding/presto-client-php
+RUN composer install --no-interaction --optimize-autoloader --no-dev
 
 CMD ["tail", "-f", "/dev/null"]
